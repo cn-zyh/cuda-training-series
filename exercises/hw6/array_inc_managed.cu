@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 // error checking macro
 #define cudaCheckErrors(msg)                                                                                  \
   do {                                                                                                        \
@@ -11,46 +12,41 @@
     }                                                                                                         \
   } while (0)
 
-struct list_elem {
-  int key;
-  list_elem *next;
-};
-
-void free_list(list_elem *list, int num) {
-  list_elem *iter = list;
-  for (int i = 0; i < num; ++i) {
-    list_elem *next = iter->next;
-    cudaFree(iter);
-    iter = next;
-  }
-}
 template <typename T>
 void alloc_bytes(T &ptr, size_t num_bytes) {
   cudaMallocManaged(&ptr, num_bytes);
-  cudaCheckErrors("cuda error!");
+  cudaCheckErrors("cudaMallocManaged Error");
 }
 
-__host__ __device__ void print_element(list_elem *list, int ele_num) {
-  list_elem *elem = list;
-  for (int i = 0; i < ele_num; i++) elem = elem->next;
-  printf("key = %d\n", elem->key);
-}
-
-__global__ void gpu_print_element(list_elem *list, int ele_num) { print_element(list, ele_num); }
-
-const int num_elem = 5;
-const int ele = 3;
-int main() {
-  list_elem *list_base, *list;
-  alloc_bytes(list_base, sizeof(list_elem));
-  list = list_base;
-  for (int i = 0; i < num_elem; i++) {
-    list->key = i;
-    alloc_bytes(list->next, sizeof(list_elem));
-    list = list->next;
+__global__ void inc(int *array, size_t n) {
+  size_t idx = threadIdx.x + blockDim.x * blockIdx.x;
+  while (idx < n) {
+    array[idx]++;
+    idx += blockDim.x * gridDim.x;  // grid-stride loop
   }
-  print_element(list_base, ele);
-  gpu_print_element<<<1, 1>>>(list_base, ele);
+}
+
+const size_t ds = 32ULL * 1024ULL * 1024ULL;
+
+int main() {
+  int *h_array;
+  alloc_bytes(h_array, ds * sizeof(h_array[0]));
+  memset(h_array, 0, ds * sizeof(h_array[0]));
+  auto s = std::chrono::steady_clock::now();
+  // cudaMemPrefetchAsync(h_array, ds * sizeof(h_array[0]), 0);
+  inc<<<256, 256>>>(h_array, ds);
+  cudaCheckErrors("kernel launch error");
+  // cudaMemPrefetchAsync(h_array, ds * sizeof(h_array[0]), cudaCpuDeviceId);
   cudaDeviceSynchronize();
-  cudaCheckErrors("cuda error!");
+  auto e = std::chrono::steady_clock::now();
+  auto elapse = std::chrono::duration_cast<std::chrono::milliseconds>(e - s).count();
+  printf("elapse: %lu\n", elapse);
+  for (int i = 0; i < ds; i++)
+    if (h_array[i] != 1) {
+      printf("mismatch at %d, was: %d, expected: %d\n", i, h_array[i], 1);
+      return -1;
+    }
+  printf("success!\n");
+  cudaFree(h_array);
+  return 0;
 }
